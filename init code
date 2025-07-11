@@ -1,0 +1,403 @@
+import json
+import os
+import cv2
+import time
+import face_recognition # For face recognition capabilities
+import numpy as np # For numerical operations on face encodings
+import tkinter as tk
+from tkinter import messagebox
+from PIL import Image, ImageTk, UnidentifiedImageError # Import UnidentifiedImageError
+import datetime # For timestamp in leaderboard
+
+# === File paths ===
+KNOWN_FACES_FILE = "known_faces.json"
+LEADERBOARD_FILE = "leaderboard.json"
+
+# === Quiz questions (including 10 new questions and 1 riddle) ===
+questions = [
+    {"type": "multiple_choice", "question": "What is the capital of France?", "options": ["Paris", "London", "Berlin", "Madrid"], "answer": "Paris"},
+    {"type": "multiple_choice", "question": "What is 5 + 3?", "options": ["5", "8", "10", "12"], "answer": "8"},
+    {"type": "multiple_choice", "question": "What color is the sky?", "options": ["Blue", "Red", "Green", "Yellow"], "answer": "Blue"},
+    {"type": "multiple_choice", "question": "What is the largest planet in our solar system?", "options": ["Mars", "Jupiter", "Earth", "Saturn"], "answer": "Jupiter"},
+    {"type": "multiple_choice", "question": "Who painted the Mona Lisa?", "options": ["Vincent van Gogh", "Leonardo da Vinci", "Pablo Picasso", "Claude Monet"], "answer": "Leonardo da Vinci"},
+    {"type": "multiple_choice", "question": "What is the chemical symbol for water?", "options": ["H2O", "CO2", "O2", "NaCl"], "answer": "H2O"},
+    {"type": "multiple_choice", "question": "Which country is known as the Land of the Rising Sun?", "options": ["China", "Japan", "Thailand", "South Korea"], "answer": "Japan"},
+    {"type": "multiple_choice", "question": "What is 7 × 8?", "options": ["54", "56", "64", "48"], "answer": "56"},
+    {"type": "multiple_choice", "question": "What is the longest river in the world?", "options": ["Amazon", "Nile", "Yangtze", "Mississippi"], "answer": "Nile"},
+    {"type": "multiple_choice", "question": "Who was the first person to walk on the moon?", "options": ["Buzz Aldrin", "Yuri Gagarin", "Neil Armstrong", "John Glenn"], "answer": "Neil Armstrong"},
+    {"type": "multiple_choice", "question": "What gas do plants absorb from the atmosphere?", "options": ["Oxygen", "Nitrogen", "Carbon Dioxide", "Helium"], "answer": "Carbon Dioxide"},
+    {"type": "multiple_choice", "question": "In which year did World War II end?", "options": ["1942", "1945", "1939", "1950"], "answer": "1945"},
+    {"type": "multiple_choice", "question": "What is the smallest prime number?", "options": ["1", "2", "3", "5"], "answer": "2"},
+    {"type": "riddle", "question": "What has keys but can't open locks?", "answer": "piano"}
+]
+
+# === Load & save functions ===
+def load_json_safe(file_path):
+    """Loads JSON data from a file, handling missing or corrupted files."""
+    if not os.path.exists(file_path):
+        print(f"[DEBUG] {file_path} does not exist. Creating empty file.")
+        return {}
+    try:
+        with open(file_path, 'r') as f:
+            content = f.read().strip()
+            if not content:
+                print(f"[DEBUG] {file_path} is empty. Returning empty dict.")
+                return {}
+            return json.loads(content)
+    except json.JSONDecodeError:
+        print(f"[WARNING] {file_path} is corrupted. Resetting.")
+        return {}
+
+def save_json(data, file_path):
+    """Saves data to a JSON file."""
+    try:
+        with open(file_path, 'w') as f:
+            json.dump(data, f, indent=2)
+        print(f"[DEBUG] Saved data to {file_path}")
+    except Exception as e:
+        print(f"[ERROR] Failed to save {file_path}: {e}")
+
+def load_known_faces():
+    """Loads known face encodings from the JSON file."""
+    return load_json_safe(KNOWN_FACES_FILE)
+
+def save_known_faces(faces):
+    """Saves known face encodings to the JSON file."""
+    save_json(faces, KNOWN_FACES_FILE)
+
+def load_leaderboard():
+    """Loads leaderboard data from the JSON file."""
+    return load_json_safe(LEADERBOARD_FILE)
+
+def save_leaderboard(board):
+    """Saves leaderboard data to the JSON file."""
+    save_json(board, LEADERBOARD_FILE)
+
+# === Encode face from image ===
+def encode_face(frame):
+    """
+    Detects face locations and computes face encodings from a given frame.
+    Returns the first encoding and its location, or None if no face is found.
+    """
+    # Convert frame to RGB (face_recognition expects RGB)
+    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    
+    face_locations = face_recognition.face_locations(rgb_frame)
+    if not face_locations:
+        print("[DEBUG] No face locations detected in frame.")
+        return None, None
+    
+    # Attempt to get face encodings. Added try-except for robustness.
+    try:
+        face_encodings = face_recognition.face_encodings(rgb_frame, face_locations)
+    except Exception as e:
+        print(f"Error computing face encodings: {e}")
+        print("This might indicate an issue with dlib models. Try clearing face_recognition cache.")
+        return None, None
+
+    if face_encodings:
+        print("[DEBUG] Face encoding successful.")
+        return face_encodings[0], face_locations[0]
+    print("[DEBUG] No face encodings generated.")
+    return None, None
+
+# === Compare face to known encodings ===
+def recognize_face(frame, known_faces):
+    """
+    Recognizes a face in the frame by comparing it to known face encodings.
+    Returns the recognized name, face location, and face image, or None if not recognized.
+    """
+    encoding, location = encode_face(frame)
+    if encoding is None:
+        print("[DEBUG] No encoding returned from encode_face.")
+        return None, None, None
+    
+    # Iterate through known faces to find a match
+    for name, stored_encoding in known_faces.items():
+        stored_encoding = np.array(stored_encoding) # Convert list back to numpy array
+        # Compare faces with a tolerance (0.6 is a common default)
+        if face_recognition.compare_faces([stored_encoding], encoding, tolerance=0.6)[0]:
+            top, right, bottom, left = location
+            # Ensure face_image is not empty before attempting to save
+            if top >= 0 and right >= 0 and bottom >= 0 and left >= 0 and \
+               top < frame.shape[0] and bottom < frame.shape[0] and \
+               left < frame.shape[1] and right < frame.shape[1]:
+                face_image = frame[top:bottom, left:right]
+                # Check if the cropped image has valid dimensions and content
+                if face_image.shape[0] > 0 and face_image.shape[1] > 0 and face_image.size > 0:
+                    try:
+                        # Save a temporary image of the recognized face for the quiz UI
+                        img_filename = f"temp_face_{name}.jpg"
+                        cv2.imwrite(img_filename, face_image)
+                        print(f"[DEBUG] Saved face image to {img_filename} at {os.path.abspath(img_filename)}")
+                    except Exception as e:
+                        print(f"[ERROR] Failed to save face image for {name}: {e}")
+                        # If saving fails, return None for image, but still return name and location
+                        return name, location, None 
+                else:
+                    print(f"[WARNING] Cropped face_image for {name} is empty or invalid dimensions ({face_image.shape}). Not saving.")
+                    return name, location, None # Return None for image
+            else:
+                print(f"[WARNING] Invalid face location coordinates for {name}. Not saving image.")
+                return name, location, None # Return None for image
+            return name, location, face_image # Return name, location, and the actual face_image numpy array
+    print("[DEBUG] No matching face found in known_faces.")
+    return None, None, None
+
+# === Quiz logic ===
+def run_quiz(name, leaderboard):
+    """
+    Runs the quiz for the recognized player using a Tkinter GUI.
+    """
+    score = 0
+    root = tk.Tk()
+    root.title("Face Quiz Game")
+    root.geometry("800x600")  # Increased size for visibility
+
+    # Overlay: Name, scores, and face image
+    # Ensure default values for new players
+    player_data = leaderboard.get(name, {"games_played": 0, "total_score": 0, "last_played": "Never"})
+    total_score = player_data["total_score"]
+    games_played = player_data["games_played"]
+    overlay_text = f"Name: {name}\nTotal Score: {total_score}\nGames Played: {games_played}"
+    overlay_label = tk.Label(root, text=overlay_text, justify="left", font=("Arial", 12), bg="lightgray", relief="solid", borderwidth=2)
+    overlay_label.place(x=10, y=450)  # Lower position
+    overlay_label.lift()
+    print(f"[DEBUG] Overlay label created at (x=10, y=450) with text: {overlay_text}")
+
+    # --- Image Loading Section ---
+    img_path = f"temp_face_{name}.jpg"
+    print(f"[DEBUG] Attempting to load image from: {os.path.abspath(img_path)}")
+    
+    # Placeholder for image if loading fails
+    photo = None
+    canvas = None
+    
+    if os.path.exists(img_path):
+        try:
+            img = Image.open(img_path)
+            # Convert to RGB before resizing to ensure consistent format for ImageTk
+            img = img.convert("RGB") 
+            img = img.resize((150, 150), Image.Resampling.LANCZOS)
+            photo = ImageTk.PhotoImage(img)
+            
+            canvas = tk.Canvas(root, width=150, height=150, bg="lightgray", relief="solid", borderwidth=2)
+            canvas.place(x=10, y=290)  # Lower position
+            canvas.create_image(0, 0, anchor="nw", image=photo)
+            canvas.image = photo  # Keep reference to prevent garbage collection
+            canvas.lift()
+            print(f"[DEBUG] Canvas created at (x=10, y=290) with image from {img_path}")
+        except UnidentifiedImageError as e:
+            error_message = f"[ERROR] Image file corrupted or unrecognized format: {e}"
+            print(error_message)
+            error_label = tk.Label(root, text=error_message, font=("Arial", 10), bg="lightgray", relief="solid", borderwidth=2, wraplength=140)
+            error_label.place(x=10, y=290)
+            error_label.lift()
+        except Exception as e:
+            error_message = f"[ERROR] Failed to load/process face image for {name}: {e}"
+            print(error_message)
+            error_label = tk.Label(root, text=error_message, font=("Arial", 10), bg="lightgray", relief="solid", borderwidth=2, wraplength=140)
+            error_label.place(x=10, y=290)
+            error_label.lift()
+    else:
+        error_message = f"[WARNING] Face image file not found: {os.path.abspath(img_path)}"
+        print(error_message)
+        error_label = tk.Label(root, text=error_message, font=("Arial", 10), bg="lightgray", relief="solid", borderwidth=2, wraplength=140)
+        error_label.place(x=10, y=290)
+        error_label.lift()
+    # --- End Image Loading Section ---
+
+
+    def ask_question(index=0):
+        """
+        Displays a single quiz question and handles user input.
+        """
+        nonlocal score # Allow modification of score from outer scope
+        if index >= len(questions):
+            # Quiz finished
+            messagebox.showinfo("Result", f"{name}, your final score: {score}/{len(questions)}")
+            
+            # Update leaderboard
+            leaderboard[name] = leaderboard.get(name, {"games_played": 0, "total_score": 0, "last_played": ""})
+            leaderboard[name]["games_played"] += 1
+            leaderboard[name]["total_score"] += score
+            leaderboard[name]["last_played"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            save_leaderboard(leaderboard)
+            display_leaderboard(leaderboard) # Display updated leaderboard in console
+            root.destroy() # Close quiz window
+            return
+
+        # Clear previous question widgets (except overlay and canvas)
+        for widget in root.winfo_children():
+            # Check if widget is not the overlay_label or the canvas, and not the error_label if it exists
+            if widget is not overlay_label and \
+               not (isinstance(widget, tk.Canvas) and widget.winfo_y() == 290) and \
+               not (isinstance(widget, tk.Label) and widget.winfo_y() == 290): # This covers the error_label too
+                widget.destroy()
+                # print(f"[DEBUG] Destroyed widget: {widget.winfo_name()}") # Too verbose
+
+        q = questions[index]
+        question_label = tk.Label(root, text=q["question"], font=("Arial", 14), wraplength=700) # Added wraplength
+        question_label.pack(pady=20)
+        print(f"[DEBUG] Displaying question {index + 1}: {q['question']}")
+
+        if q["type"] == "multiple_choice":
+            var = tk.StringVar(value="0") # Default value to prevent no selection
+            for i, opt in enumerate(q["options"], 1):
+                tk.Radiobutton(root, text=opt, value=str(i), variable=var, font=("Arial", 12)).pack(anchor="w", padx=20)
+            
+            def submit_mc():
+                try:
+                    choice_index = int(var.get()) - 1
+                    if 0 <= choice_index < len(q["options"]) and q["options"][choice_index] == q["answer"]:
+                        nonlocal score
+                        score += 1
+                        print(f"[DEBUG] Correct answer for question {index + 1}")
+                    else:
+                        print(f"[DEBUG] Incorrect answer for question {index + 1}. Correct: {q['answer']}")
+                except ValueError: # No option selected
+                    print(f"[DEBUG] No choice selected for question {index + 1}")
+                ask_question(index + 1) # Move to next question
+
+            tk.Button(root, text="Submit", command=submit_mc, font=("Arial", 12)).pack(pady=10)
+            
+        else:  # Riddle
+            entry = tk.Entry(root, font=("Arial", 12), width=50) # Added width
+            entry.pack(pady=10)
+            
+            def submit_riddle():
+                answer = entry.get().strip().lower()
+                if answer == q["answer"].lower():
+                    nonlocal score
+                    score += 1
+                    print(f"[DEBUG] Correct riddle answer: {answer}")
+                else:
+                    print(f"[DEBUG] Incorrect riddle answer: {answer}. Correct: {q['answer']}")
+                ask_question(index + 1) # Move to next question
+
+            tk.Button(root, text="Submit", command=submit_riddle, font=("Arial", 12)).pack(pady=10)
+
+    ask_question() # Start the quiz from the first question
+    root.mainloop() # Start the Tkinter event loop
+
+# === Display leaderboard ===
+def display_leaderboard(leaderboard):
+    """Displays the current leaderboard in the console."""
+    print("\n=== Leaderboard (Sorted by Total Score) ===")
+    if not leaderboard:
+        print("No scores yet. Be the first to play!")
+        return
+    
+    # Sort by total_score in descending order
+    sorted_board = sorted(leaderboard.items(), key=lambda x: x[1].get("total_score", 0), reverse=True)
+    
+    for rank, (name, data) in enumerate(sorted_board, 1):
+        total_score = data.get("total_score", 0)
+        games_played = data.get("games_played", 0)
+        last_played = data.get("last_played", "Never")
+        
+        avg_score = total_score / games_played if games_played > 0 else 0
+        
+        print(f"{rank}. {name}: Games Played: {games_played}, Total Score: {total_score}, "
+              f"Avg Score: {avg_score:.2f}, Last Played: {last_played}")
+    print("===========================================\n")
+
+# === Enrollment ===
+def enroll_new_face(name, frame, known_faces):
+    """
+    Enrolls a new face with the given name and frame.
+    """
+    if not name:
+        print("[WARNING] Name cannot be empty for enrollment.")
+        return
+    
+    encoding, _ = encode_face(frame)
+    if encoding is not None:
+        known_faces[name] = encoding.tolist() # Store as list for JSON serialization
+        save_known_faces(known_faces)
+        print(f"[INFO] {name} enrolled successfully.")
+    else:
+        print("[WARNING] No face detected in the frame for enrollment. Try again.")
+        cv2.imwrite("debug_no_face_enroll.jpg", frame) # Save frame for debugging
+        print("[DEBUG] Saved frame to debug_no_face_enroll.jpg")
+
+# === Main camera loop ===
+def recognize_and_run():
+    """
+    Manages the main camera loop for face recognition and game initiation.
+    """
+    known_faces = load_known_faces()
+    leaderboard = load_leaderboard()
+    print(f"[DEBUG] Loaded known_faces: {list(known_faces.keys())}")
+    print(f"[DEBUG] Loaded leaderboard: {list(leaderboard.keys())}")
+
+    cap = cv2.VideoCapture(0) # Open default camera
+    if not cap.isOpened():
+        print("[ERROR] Could not open webcam. Please ensure it's connected and not in use.")
+        return
+
+    print("\n[INFO] Camera Feed Active.")
+    print("[INFO] Press 's' to enroll a new face.")
+    print("[INFO] Press 'ENTER' to start quiz if your face is recognized.")
+    print("[INFO] Press 'q' to quit the application.")
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            print("[ERROR] Failed to capture frame from webcam.")
+            break
+
+        display_frame = frame.copy()
+        
+        # Detect faces for drawing rectangles
+        face_locations = face_recognition.face_locations(frame)
+        for (top, right, bottom, left) in face_locations:
+            # Draw rectangle around detected face
+            cv2.rectangle(display_frame, (left, top), (right, bottom), (0, 255, 0), 2)
+
+        # Add instructions to the display frame
+        cv2.putText(display_frame, "Press 's' to enroll, 'ENTER' to quiz, 'q' to quit", (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        
+        cv2.imshow("Face Quiz Game", display_frame) # Show the camera feed
+
+        key = cv2.waitKey(1) & 0xFF # Wait for a key press
+
+        if key == ord('s'): # 's' key for enrollment
+            print("\n[PROMPT] Enter name for new enrollment:")
+            name = input("Name: ").strip()
+            # Pass the current frame to enroll_new_face
+            enroll_new_face(name, frame, known_faces)
+            known_faces = load_known_faces() # Reload known faces after enrollment
+
+        elif key == 13:  # ENTER key
+            print("\n[INFO] Attempting to recognize face...")
+            # Attempt to recognize face from the current frame
+            recognized_name, _, _ = recognize_face(frame, known_faces)
+            if recognized_name:
+                print(f"[INFO] Welcome back, {recognized_name}! Starting quiz...")
+                cap.release() # Release camera before starting quiz GUI
+                cv2.destroyAllWindows()
+                run_quiz(recognized_name, leaderboard) # Run the quiz
+                
+                # After quiz finishes and GUI closes, re-initialize camera for main loop
+                cap = cv2.VideoCapture(0)
+                if not cap.isOpened():
+                    print("[ERROR] Could not reopen webcam after quiz. Exiting application.")
+                    return # Exit if camera cannot be reopened
+                print("\n[INFO] Camera re-initialized for further recognition/enrollment.")
+                continue # Continue the main loop
+
+            else:
+                print("[WARNING] Face not recognized! Please ensure your face is clear or press 's' to enroll.")
+
+        elif key == ord('q'): # 'q' key to quit
+            print("\n[INFO] Quitting application...")
+            break
+
+    cap.release() # Release camera when main loop breaks
+    cv2.destroyAllWindows() # Close all OpenCV windows
+
+# === Run the app ===
+if __name__ == "__main__":
+    recognize_and_run()
